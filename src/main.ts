@@ -1,99 +1,145 @@
-import {App, Editor, MarkdownView, Modal, Notice, Plugin} from 'obsidian';
-import {DEFAULT_SETTINGS, MyPluginSettings, SampleSettingTab} from "./settings";
+/* eslint-disable import/no-nodejs-modules */
+// cSpell:ignore unmatch 关键字
+import {Notice, Plugin, TAbstractFile, TFile, TFolder, FileSystemAdapter, normalizePath} from "obsidian";
+import {DEFAULT_SETTINGS, MyGitEnhancedPluginSettings, MyGitEnhancedSettingTab} from "./settings";
+import {execFile} from "child_process";
+import {promisify} from "util";
+import {join} from "path";
+import {access} from "fs/promises";
+import {constants as fsConstants, rm} from "fs";
 
-// Remember to rename these classes and interfaces!
+const execFileAsync = promisify(execFile);
 
-export default class MyPlugin extends Plugin {
-	settings: MyPluginSettings;
+export default class MyGitEnhancedPlugin extends Plugin {
+  settings: MyGitEnhancedPluginSettings;
+  // 串行处理重命名事件，避免 git 命令互相抢占。
+  private renameQueue: Promise<void> = Promise.resolve();
 
-	async onload() {
-		await this.loadSettings();
+  /**
+   * 插件加载时注册设置面板与重命名监听。
+   */
+  async onload() {
+    this.settings = await this.loadSettings();
+    this.addSettingTab(new MyGitEnhancedSettingTab(this.app, this));
 
-		// This creates an icon in the left ribbon.
-		this.addRibbonIcon('dice', 'Sample', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
-		});
+    // 开启重命名监听，事后用 git rm/add 修正索引。
+    this.registerEvent(
+      this.app.vault.on("rename", (file: TAbstractFile, oldPath: string) => {
+        if (!(file instanceof TFile) && !(file instanceof TFolder)) {
+          return;
+        }
 
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status bar text');
+        const newPath = file.path;
+        if (oldPath === newPath) {
+          return;
+        }
+        
+        console.debug("obsidian-git-enhanced: 新旧路径", {oldPath: normalizePath(oldPath), newPath: normalizePath(newPath)});
 
-		// This adds a simple command that can be triggered anywhere
-		this.addCommand({
-			id: 'open-modal-simple',
-			name: 'Open modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
-			}
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'replace-selected',
-			name: 'Replace selected content',
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				editor.replaceSelection('Sample editor command');
-			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-modal-complex',
-			name: 'Open modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
+        this.renameQueue = this.renameQueue
+          .then(() => this.fixRenameWithGit(oldPath, newPath, file instanceof TFolder))
+          .catch((error) => {
+            console.error("obsidian-git-enhanced: Git 暂存重命名失败", error);
+            new Notice("Git 暂存重命名失败，请查看控制台日志。");
+          });
+      })
+    );
+  }
 
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
-				}
-				return false;
-			}
-		});
+  onunload() {}
 
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
+  /**
+   * 读取持久化设置。
+   * @returns 合并默认值后的设置对象。
+   */
+  private async loadSettings(): Promise<MyGitEnhancedPluginSettings> {
+    const stored = await this.loadData();
+    if (stored && typeof stored === "object") {
+      return Object.assign({}, DEFAULT_SETTINGS, stored as Partial<MyGitEnhancedPluginSettings>);
+    }
+    return Object.assign({}, DEFAULT_SETTINGS);
+  }
 
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			new Notice("Click");
-		});
+  /**
+   * 保存当前设置。
+   * @returns Promise<void>
+   */
+  async saveSettings(): Promise<void> {
+    await this.saveData(this.settings);
+  }
 
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
+  /**
+   * 使用 git rm --cached + git add 修正索引，让 Git 自动识别重命名。
+   * @param oldPath 重命名前的路径。
+   * @param newPath 重命名后的路径。
+   * @param isFolder 是否为文件夹。
+   */
+  private async fixRenameWithGit(oldPath: string, newPath: string, isFolder: boolean): Promise<void> {
+    const adapter = this.app.vault.adapter;
+    if (!(adapter instanceof FileSystemAdapter)) {
+      return;
+    }
 
-	}
+    const vaultPath = adapter.getBasePath();
+    const gitDir = join(vaultPath, ".git");
+    if (!(await this.pathExists(gitDir))) {
+      return;
+    }
 
-	onunload() {
-	}
+    const normalizedOld = normalizePath(oldPath);
+    const normalizedNew = normalizePath(newPath);
+    const newAbsolutePath = join(vaultPath, normalizedNew);
+    if (!(await this.pathExists(newAbsolutePath))) {
+      return;
+    }
+    if (!(await this.isTrackedPath(vaultPath, normalizedOld))) {
+      return;
+    }
 
-	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData() as Partial<MyPluginSettings>);
-	}
+    const rmArgs = isFolder
+      ? ["rm", "--cached", "-r", "--", normalizedOld]
+      : ["rm", "--cached", "--", normalizedOld];
 
-	async saveSettings() {
-		await this.saveData(this.settings);
-	}
-}
+    console.debug("obsidian-git-enhanced: git rm 参数", {rmArgs});
+    await this.runGitCommand(vaultPath, rmArgs);
+    await this.runGitCommand(vaultPath, ["add", "--", normalizedNew]);
+  }
 
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
-	}
+  /**
+   * 判断给定路径是否存在。
+   * @param path 绝对路径。
+   * @returns 是否存在。
+   */
+  private async pathExists(path: string): Promise<boolean> {
+    try {
+      await access(path, fsConstants.F_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  }
 
-	onOpen() {
-		let {contentEl} = this;
-		contentEl.setText('Woah!');
-	}
+  /**
+   * 判断路径是否已被 Git 跟踪。
+   * @param cwd 仓库根目录。
+   * @param relativePath 相对路径。
+   * @returns 是否已跟踪。
+   */
+  private async isTrackedPath(cwd: string, relativePath: string): Promise<boolean> {
+    try {
+      await this.runGitCommand(cwd, ["ls-files", "--error-unmatch", "--", relativePath]);
+      return true;
+    } catch {
+      return false;
+    }
+  }
 
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
-	}
+  /**
+   * 运行 Git 命令。
+   * @param cwd 仓库根目录。
+   * @param args Git 参数列表。
+   */
+  private async runGitCommand(cwd: string, args: string[]): Promise<void> {
+    await execFileAsync("git", args, {cwd});
+  }
 }

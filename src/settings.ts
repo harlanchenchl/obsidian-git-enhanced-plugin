@@ -1,18 +1,18 @@
 import {App, PluginSettingTab, Setting} from "obsidian";
-import MyPlugin from "./main";
+import MyGitEnhancedPlugin from "./main";
 
-export interface MyPluginSettings {
+export interface MyGitEnhancedPluginSettings {
 	mySetting: string;
 }
 
-export const DEFAULT_SETTINGS: MyPluginSettings = {
-	mySetting: 'default'
+export const DEFAULT_SETTINGS: MyGitEnhancedPluginSettings = {
+	mySetting: "default"
 }
 
-export class SampleSettingTab extends PluginSettingTab {
-	plugin: MyPlugin;
+export class MyGitEnhancedSettingTab extends PluginSettingTab {
+	plugin: MyGitEnhancedPlugin;
 
-	constructor(app: App, plugin: MyPlugin) {
+	constructor(app: App, plugin: MyGitEnhancedPlugin) {
 		super(app, plugin);
 		this.plugin = plugin;
 	}

@@ -1,3 +1,9 @@
+# 通过符号链接把插件放到Obsidian仓库中
+
+```powershell
+cmd /c mklink /D "D:\mydata\pkm\.obsidian\plugins\obsidian-git-enhanced-plugin" "D:\workspace\vscode\obsidian-git-enhanced-plugin\"
+```
+
 # Obsidian Sample Plugin
 
 This is a sample plugin for Obsidian (https://obsidian.md).
